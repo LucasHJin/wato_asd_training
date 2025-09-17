@@ -24,6 +24,9 @@ MapMemoryNode::MapMemoryNode()
     global_map_.info.origin.position.y = -15.0;
     global_map_.info.origin.orientation.w = 1.0;
     global_map_.data.assign(global_map_.info.width * global_map_.info.height, -1);
+
+    costmap_updated_ = true;
+    should_update_map_ = true;
 }
 
 void MapMemoryNode::costmapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)

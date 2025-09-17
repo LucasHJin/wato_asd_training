@@ -87,7 +87,7 @@ bool isCellValid(const CellIndex &cell, const nav_msgs::msg::OccupancyGrid &map)
   if (cell.x < 0 || cell.y < 0 || cell.x >= static_cast<int>(map.info.width) || cell.y >= static_cast<int>(map.info.height))
     return false;
   int index = cell.y * map.info.width + cell.x;
-  return map.data[index] == 0; // 0 = free, >0 = occupied
+  return map.data[index] <= 0; // free or unknown
 }
 
 // Get neighbors (4-connected)
