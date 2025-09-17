@@ -13,6 +13,9 @@ endif()
 # Search for dependencies required for building this package
 find_package(ament_cmake REQUIRED) # ROS2 build tool
 find_package(rclcpp REQUIRED)      # ROS2 C++ package
+find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 
 # Compiles source files into a library
 # A library is not executed, instead other executables can link
@@ -33,6 +36,12 @@ ament_target_dependencies(map_memory_lib
 add_executable(map_memory_node src/map_memory_node.cpp)
 # Link to the previously built library to access map_memory classes and methods
 target_link_libraries(map_memory_node map_memory_lib)
+ament_target_dependencies(map_memory_node
+  rclcpp
+  std_msgs
+  sensor_msgs
+  nav_msgs
+)
 
 # Copy executable to installation location
 install(TARGETS

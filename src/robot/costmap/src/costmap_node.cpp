@@ -8,7 +8,9 @@ CostmapNode::CostmapNode()
   width_(200),
   height_(200),
   origin_x_(-10.0),
-  origin_y_(-10.0) 
+  origin_y_(-10.0),
+  robot_x_(0.0),
+  robot_y_(0.0)
 {
   // Initialize costmap grid
   initializeCostmap();
@@ -19,13 +21,6 @@ CostmapNode::CostmapNode()
     std::bind(&CostmapNode::laserCallback, this, std::placeholders::_1));
   // Publisher: /costmap
   costmap_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/costmap", 10);
-  // Subscriber: robot odometry
-  odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-    "/odom/filtered", 10,
-    [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
-        robot_x_ = msg->pose.pose.position.x;
-        robot_y_ = msg->pose.pose.position.y;
-    });
 }
 
 void CostmapNode::initializeCostmap() {
@@ -95,10 +90,10 @@ void CostmapNode::publishCostmap() {
 }
 
 void CostmapNode::laserCallback(const sensor_msgs::msg::LaserScan::SharedPtr scan) {
-  origin_x_ = robot_x_ - width_ * resolution_ / 2.0;
-  origin_y_ = robot_y_ - height_ * resolution_ / 2.0;
+  origin_x_ = -width_ * resolution_ / 2.0;
+  origin_y_ = -height_ * resolution_ / 2.0;
 
-  initializeCostmap();
+  initializeCostmap();  
 
   for (size_t i = 0; i < scan->ranges.size(); ++i) {
     double angle = scan->angle_min + i * scan->angle_increment;
