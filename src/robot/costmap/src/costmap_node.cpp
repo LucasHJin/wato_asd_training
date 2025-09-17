@@ -5,10 +5,10 @@
 CostmapNode::CostmapNode()
 : Node("costmap_node"),
   resolution_(0.1), 
-  width_(200),
-  height_(200),
-  origin_x_(-10.0),
-  origin_y_(-10.0),
+  width_(100),
+  height_(100),
+  origin_x_(-5.0),
+  origin_y_(-5.0),
   robot_x_(0.0),
   robot_y_(0.0)
 {
