@@ -32,6 +32,8 @@ private:
     double last_y_{0.0};
     double distance_threshold_{1.5};  // meters (tune this)
     bool should_update_map_{false};
+    bool first_costmap_received_{false};
+    bool first_odom_received_{false};
 
     // Callbacks
     void costmapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);

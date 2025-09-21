@@ -1,7 +1,8 @@
 #include "map_memory_node.hpp"
 
 MapMemoryNode::MapMemoryNode()
-    : Node("map_memory_node"), last_x_(0.0), last_y_(0.0), distance_threshold_(1.5) // initialize threshold
+    : Node("map_memory_node"), last_x_(0.0), last_y_(0.0), distance_threshold_(1.0),
+      first_costmap_received_(false), first_odom_received_(false) // Add flags for initial data
 {
     // Subscribers
     costmap_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
@@ -26,14 +27,42 @@ MapMemoryNode::MapMemoryNode()
     global_map_.info.origin.orientation.w = 1.0;
     global_map_.data.assign(global_map_.info.width * global_map_.info.height, -1);
 
-    costmap_updated_ = true;
-    should_update_map_ = true;
+    costmap_updated_ = false; // Start as false
+    should_update_map_ = false; // Start as false
 }
 
 void MapMemoryNode::costmapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
 {
     latest_costmap_ = *msg;
     costmap_updated_ = true;
+    
+    if (!first_costmap_received_)
+    {
+        // Check if this costmap actually contains obstacles
+        bool has_obstacles = false;
+        for (const auto& cell : msg->data) {
+            if (cell > 0) {  // Found an obstacle or inflated cell
+                has_obstacles = true;
+                break;
+            }
+        }
+        
+        if (has_obstacles) {
+            first_costmap_received_ = true;
+            RCLCPP_INFO(this->get_logger(), "First meaningful costmap received (size: %dx%d)", 
+                        msg->info.width, msg->info.height);
+            
+            // Trigger immediate update if we also have odometry
+            if (first_odom_received_)
+            {
+                should_update_map_ = true;
+                RCLCPP_INFO(this->get_logger(), "Both meaningful costmap and odometry available - triggering initial map update");
+            }
+        } else {
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
+                                "Waiting for costmap with obstacles...");
+        }
+    }
 }
 
 void MapMemoryNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
@@ -42,12 +71,31 @@ void MapMemoryNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
     robot_x_ = msg->pose.pose.position.x;
     robot_y_ = msg->pose.pose.position.y;
 
-    double distance = std::hypot(robot_x_ - last_x_, robot_y_ - last_y_);
-    if (distance >= distance_threshold_)
+    if (!first_odom_received_)
     {
+        first_odom_received_ = true;
         last_x_ = robot_x_;
         last_y_ = robot_y_;
-        should_update_map_ = true;
+        RCLCPP_INFO(this->get_logger(), "First odometry received at (%.2f, %.2f)", robot_x_, robot_y_);
+        
+        // Trigger immediate update if we also have costmap
+        if (first_costmap_received_)
+        {
+            should_update_map_ = true;
+            RCLCPP_INFO(this->get_logger(), "Both costmap and odometry available - triggering initial map update");
+        }
+    }
+    else
+    {
+        // Normal distance-based updates after initial setup
+        double distance = std::hypot(robot_x_ - last_x_, robot_y_ - last_y_);
+        if (distance >= distance_threshold_)
+        {
+            last_x_ = robot_x_;
+            last_y_ = robot_y_;
+            should_update_map_ = true;
+            RCLCPP_INFO(this->get_logger(), "Robot moved %.2f meters - triggering map update", distance);
+        }
     }
 }
 
@@ -62,6 +110,8 @@ void MapMemoryNode::updateMap()
 
         should_update_map_ = false;
         costmap_updated_ = false;
+        
+        RCLCPP_INFO(this->get_logger(), "Map updated and published");
     }
 }
 

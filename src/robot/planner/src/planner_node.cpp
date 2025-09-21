@@ -75,28 +75,50 @@ bool PlannerNode::goalReached()
   return std::sqrt(dx * dx + dy * dy) < 0.5; // threshold
 }
 
-// Heuristic: Manhattan distance
+// Heuristic: Euclidean distance (better than Manhattan for diagonal movement)
 double heuristic(const CellIndex &a, const CellIndex &b)
 {
-  return std::abs(a.x - b.x) + std::abs(a.y - b.y);
+  double dx = a.x - b.x;
+  double dy = a.y - b.y;
+  return std::sqrt(dx * dx + dy * dy);
 }
 
-// Check if a cell is valid (inside map bounds and not an obstacle)
+// Check if a cell is valid (inside map bounds and not a high-cost obstacle)
 bool isCellValid(const CellIndex &cell, const nav_msgs::msg::OccupancyGrid &map)
 {
   if (cell.x < 0 || cell.y < 0 || cell.x >= static_cast<int>(map.info.width) || cell.y >= static_cast<int>(map.info.height))
     return false;
+  
   int index = cell.y * map.info.width + cell.x;
-  return map.data[index] <= 0; // free or unknown
+  int8_t cost = map.data[index];
+  
+  // Allow free space (0), unknown (-1), and low-cost inflated areas
+  // Reject high-cost obstacles (>= 50)
+  return cost < 50;
 }
 
-// Get neighbors (4-connected)
-std::vector<CellIndex> getNeighbors(const CellIndex &cell)
+// Get neighbors (8-connected for better paths)
+std::vector<std::pair<CellIndex, double>> getNeighborsWithCosts(const CellIndex &cell)
 {
-  return {{cell.x + 1, cell.y}, {cell.x - 1, cell.y}, {cell.x, cell.y + 1}, {cell.x, cell.y - 1}};
+  std::vector<std::pair<CellIndex, double>> neighbors;
+  
+  // 4-connected neighbors (cost = 1.0)
+  neighbors.push_back({{cell.x + 1, cell.y}, 1.0});
+  neighbors.push_back({{cell.x - 1, cell.y}, 1.0});
+  neighbors.push_back({{cell.x, cell.y + 1}, 1.0});
+  neighbors.push_back({{cell.x, cell.y - 1}, 1.0});
+  
+  // Diagonal neighbors (cost = sqrt(2) ≈ 1.414)
+  const double diagonal_cost = std::sqrt(2.0);
+  neighbors.push_back({{cell.x + 1, cell.y + 1}, diagonal_cost});
+  neighbors.push_back({{cell.x + 1, cell.y - 1}, diagonal_cost});
+  neighbors.push_back({{cell.x - 1, cell.y + 1}, diagonal_cost});
+  neighbors.push_back({{cell.x - 1, cell.y - 1}, diagonal_cost});
+  
+  return neighbors;
 }
 
-// A* search algorithm
+// A* search algorithm with improved cost handling
 std::vector<CellIndex> aStar(const nav_msgs::msg::OccupancyGrid &map, const CellIndex &start, const CellIndex &goal)
 {
   std::priority_queue<AStarNode, std::vector<AStarNode>, CompareF> open_set;
@@ -129,12 +151,18 @@ std::vector<CellIndex> aStar(const nav_msgs::msg::OccupancyGrid &map, const Cell
 
     closed_set.insert(current.index);
 
-    for (const CellIndex &neighbor : getNeighbors(current.index))
+    // Use 8-connected neighbors with appropriate costs
+    for (const auto &[neighbor, move_cost] : getNeighborsWithCosts(current.index))
     {
       if (!isCellValid(neighbor, map) || closed_set.count(neighbor) > 0)
         continue;
 
-      double tentative_g = g_score[current.index] + 1.0; // cost between neighbors = 1
+      // Add terrain cost (costmap values) to movement cost
+      int index = neighbor.y * map.info.width + neighbor.x;
+      double terrain_cost = std::max(0, static_cast<int>(map.data[index])) / 100.0; // Normalize 0-100 to 0-1
+      double total_move_cost = move_cost * (1.0 + terrain_cost); // Higher cost for inflated areas
+
+      double tentative_g = g_score[current.index] + total_move_cost;
 
       if (g_score.find(neighbor) == g_score.end() || tentative_g < g_score[neighbor])
       {
@@ -172,10 +200,29 @@ void PlannerNode::planPath()
   int goal_y = static_cast<int>((goal_.point.y - current_map_.info.origin.position.y) / current_map_.info.resolution);
   CellIndex goal{goal_x, goal_y};
 
+  // Validate start and goal positions
+  if (!isCellValid(start, current_map_))
+  {
+    RCLCPP_ERROR(this->get_logger(), "Start position (%d, %d) is not valid!", start.x, start.y);
+    return;
+  }
+
+  if (!isCellValid(goal, current_map_))
+  {
+    RCLCPP_ERROR(this->get_logger(), "Goal position (%d, %d) is not valid!", goal.x, goal.y);
+    return;
+  }
+
   RCLCPP_INFO(this->get_logger(), "Planning path from (%d, %d) to (%d, %d)", start.x, start.y, goal.x, goal.y);
 
   // Run A* search
   std::vector<CellIndex> waypoints = aStar(current_map_, start, goal);
+
+  if (waypoints.empty())
+  {
+    RCLCPP_ERROR(this->get_logger(), "No path found from start to goal!");
+    return;
+  }
 
   for (const auto &cell : waypoints)
   {
@@ -183,7 +230,7 @@ void PlannerNode::planPath()
     pose.header.frame_id = "map";
     pose.header.stamp = this->get_clock()->now();
 
-    // Convert grid cell to world coordinates
+    // Convert grid cell to world coordinates (use center of cell)
     pose.pose.position.x = current_map_.info.origin.position.x + (cell.x + 0.5) * current_map_.info.resolution;
     pose.pose.position.y = current_map_.info.origin.position.y + (cell.y + 0.5) * current_map_.info.resolution;
     pose.pose.position.z = 0.0;

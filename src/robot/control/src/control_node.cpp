@@ -3,13 +3,12 @@
 #include <optional>
 #include <algorithm>
 
-
 ControlNode::ControlNode() : Node("control"), control_(robot::ControlCore(this->get_logger()))
 {
   // Initialize parameters
   lookahead_distance_ = 1.0; // Lookahead distance
   goal_tolerance_ = 0.1;     // Distance to consider the goal reached
-  linear_speed_ = 0.5;       // Constant forward speed
+  linear_speed_ = 1.0;       // Constant forward speed
 
   // Subscribers and Publishers
   path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
@@ -55,20 +54,42 @@ std::optional<geometry_msgs::msg::PoseStamped> ControlNode::findLookaheadPoint()
 
     geometry_msgs::msg::Point robot_pos = robot_odom_->pose.pose.position;
 
-    for (const auto &pose_stamped : current_path_->poses)
+    // Find the closest point on the path to the robot
+    size_t closest_idx = 0;
+    double min_dist = std::numeric_limits<double>::max();
+    
+    for (size_t i = 0; i < current_path_->poses.size(); ++i)
     {
-        double dist = computeDistance(robot_pos, pose_stamped.pose.position);
-        if (dist >= lookahead_distance_)
+        double dist = computeDistance(robot_pos, current_path_->poses[i].pose.position);
+        if (dist < min_dist)
         {
-            return pose_stamped;
+            min_dist = dist;
+            closest_idx = i;
         }
     }
 
-    // If no point is beyond lookahead, return last point
-    auto &last_point = current_path_->poses.back();
-    if (computeDistance(robot_pos, last_point.pose.position) <= goal_tolerance_)
-        return std::nullopt; // Goal reached
+    // Search forward from the closest point for the lookahead point
+    for (size_t i = closest_idx; i < current_path_->poses.size(); ++i)
+    {
+        double dist = computeDistance(robot_pos, current_path_->poses[i].pose.position);
+        
+        // If we find a point at or beyond lookahead distance, use it
+        if (dist >= lookahead_distance_)
+        {
+            return current_path_->poses[i];
+        }
+    }
 
+    // If no point is beyond lookahead distance, check if we've reached the goal
+    auto &last_point = current_path_->poses.back();
+    double dist_to_goal = computeDistance(robot_pos, last_point.pose.position);
+    
+    if (dist_to_goal <= goal_tolerance_)
+    {
+        return std::nullopt; // Goal reached
+    }
+
+    // Return the last point if we're close to the end of the path
     return last_point;
 }
 
@@ -85,20 +106,37 @@ geometry_msgs::msg::Twist ControlNode::computeVelocity(const geometry_msgs::msg:
     double y = robot_odom_->pose.pose.position.y;
     double yaw = extractYaw(robot_odom_->pose.pose.orientation);
 
-    // Target position
+    // Target position relative to robot
     double dx = target.pose.position.x - x;
     double dy = target.pose.position.y - y;
 
-    // Transform target into robot frame
-    double local_x =  std::cos(-yaw)*dx - std::sin(-yaw)*dy;
-    double local_y =  std::sin(-yaw)*dx + std::cos(-yaw)*dy;
+    // Transform target into robot frame (correct transformation)
+    double local_x = std::cos(yaw) * dx + std::sin(yaw) * dy;
+    double local_y = -std::sin(yaw) * dx + std::cos(yaw) * dy;
 
-    // Pure pursuit curvature
-    double curvature = (2.0 * local_y) / (lookahead_distance_ * lookahead_distance_);
+    // Actual distance to the target point
+    double actual_distance = std::sqrt(local_x * local_x + local_y * local_y);
+    
+    // Avoid division by zero
+    if (actual_distance < 1e-6)
+    {
+        return cmd_vel; // Return zero velocity
+    }
+
+    // Pure pursuit curvature calculation using actual distance
+    double curvature = (2.0 * local_y) / (actual_distance * actual_distance);
+
+    // Limit curvature to prevent excessive turning
+    const double max_curvature = 2.0; // Adjust as needed
+    curvature = std::clamp(curvature, -max_curvature, max_curvature);
 
     // Set velocity commands
     cmd_vel.linear.x = linear_speed_;
     cmd_vel.angular.z = curvature * linear_speed_;
+
+    // Limit angular velocity
+    const double max_angular_vel = 1.5; // rad/s
+    cmd_vel.angular.z = std::clamp(cmd_vel.angular.z, -max_angular_vel, max_angular_vel);
 
     return cmd_vel;
 }

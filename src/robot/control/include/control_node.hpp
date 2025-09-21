@@ -31,12 +31,14 @@ class ControlNode : public rclcpp::Node {
     double lookahead_distance_;
     double goal_tolerance_;
     double linear_speed_;
+    bool goal_reached_;
 
     std::optional<geometry_msgs::msg::PoseStamped> findLookaheadPoint();
     geometry_msgs::msg::Twist computeVelocity(const geometry_msgs::msg::PoseStamped &target);
     double computeDistance(const geometry_msgs::msg::Point &a, const geometry_msgs::msg::Point &b);
     double extractYaw(const geometry_msgs::msg::Quaternion &quat);
     void controlLoop();
+    bool isGoalReached();
 
 };
 
