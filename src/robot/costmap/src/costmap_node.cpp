@@ -5,12 +5,11 @@
 CostmapNode::CostmapNode()
 : Node("costmap_node"),
   resolution_(0.1), 
-  width_(100),
-  height_(100),
-  origin_x_(-5.0),
-  origin_y_(-5.0),
+  width_(300),
+  height_(300),
   robot_x_(0.0),
-  robot_y_(0.0)
+  robot_y_(0.0),
+  robot_yaw_(0.0)
 {
   // Initialize costmap grid
   initializeCostmap();
@@ -19,6 +18,12 @@ CostmapNode::CostmapNode()
   lidar_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
     "/lidar", 10,
     std::bind(&CostmapNode::laserCallback, this, std::placeholders::_1));
+
+  // Subscriber: /odom/filtered (to get robot pose)
+  odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+    "/odom/filtered", 10,
+    std::bind(&CostmapNode::odomCallback, this, std::placeholders::_1));
+
   // Publisher: /costmap
   costmap_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/costmap", 10);
 }
@@ -27,12 +32,21 @@ void CostmapNode::initializeCostmap() {
   costmap_.assign(height_, std::vector<int>(width_, 0));
 }
 
-void CostmapNode::convertToGrid(double range, double angle, int &x, int &y) {
-  double world_x = range * std::cos(angle);
-  double world_y = range * std::sin(angle);
+void CostmapNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+  robot_x_ = msg->pose.pose.position.x;
+  robot_y_ = msg->pose.pose.position.y;
+  
+  // Extract yaw from quaternion
+  auto q = msg->pose.pose.orientation;
+  robot_yaw_ = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+}
 
-  x = static_cast<int>((world_x - origin_x_) / resolution_);
-  y = static_cast<int>((world_y - origin_y_) / resolution_);
+void CostmapNode::convertToGrid(double world_x, double world_y, int &x, int &y) {
+  // Convert from local coordinates (relative to robot) to grid coordinates
+  // The grid origin should be at the center for a local costmap
+  x = static_cast<int>((world_x + (width_ * resolution_ / 2.0)) / resolution_);
+  y = static_cast<int>((world_y + (height_ * resolution_ / 2.0)) / resolution_);
 }
 
 void CostmapNode::markObstacle(int x, int y) {
@@ -54,7 +68,7 @@ void CostmapNode::inflateObstacles() {
             int ny = y + dy;
             if (nx >= 0 && nx < width_ && ny >= 0 && ny < height_) {
               double distance = std::sqrt(dx*dx + dy*dy) * resolution_;
-              if (distance <= 1.0) {
+              if (distance <= 1.0 && distance > 0) {
                 int cost = static_cast<int>(100 * (1 - distance / 1.0));
                 inflated[ny][nx] = std::max(inflated[ny][nx], cost);
               }
@@ -67,17 +81,43 @@ void CostmapNode::inflateObstacles() {
   costmap_ = inflated;
 }
 
+void CostmapNode::clearRobotFootprint() {
+  int robot_radius_cells = static_cast<int>(0.3 / resolution_); // assume 30cm radius
+  int cx = width_ / 2;
+  int cy = height_ / 2;
+
+  for (int dy = -robot_radius_cells; dy <= robot_radius_cells; ++dy) {
+    for (int dx = -robot_radius_cells; dx <= robot_radius_cells; ++dx) {
+      int nx = cx + dx;
+      int ny = cy + dy;
+      if (nx >= 0 && nx < width_ && ny >= 0 && ny < height_) {
+        double distance = std::sqrt(dx*dx + dy*dy) * resolution_;
+        if (distance <= 0.3) {
+          costmap_[ny][nx] = 0; // free
+        }
+      }
+    }
+  }
+}
+
 void CostmapNode::publishCostmap() {
   nav_msgs::msg::OccupancyGrid grid;
   grid.header.stamp = this->get_clock()->now();
-  grid.header.frame_id = "map";
+  grid.header.frame_id = "base_link";  // Keep as base_link for local costmap
 
   grid.info.resolution = resolution_;
   grid.info.width = width_;
   grid.info.height = height_;
-  grid.info.origin.position.x = origin_x_;
-  grid.info.origin.position.y = origin_y_;
+  
+  // Origin should be at bottom-left corner of the grid
+  // For a local costmap centered on robot, this means negative offsets
+  grid.info.origin.position.x = -(width_ * resolution_ / 2.0);
+  grid.info.origin.position.y = -(height_ * resolution_ / 2.0);
+  grid.info.origin.position.z = 0.0;
   grid.info.origin.orientation.w = 1.0;
+  grid.info.origin.orientation.x = 0.0;
+  grid.info.origin.orientation.y = 0.0;
+  grid.info.origin.orientation.z = 0.0;
 
   grid.data.resize(width_ * height_);
   for (int y = 0; y < height_; ++y) {
@@ -90,8 +130,12 @@ void CostmapNode::publishCostmap() {
 }
 
 void CostmapNode::laserCallback(const sensor_msgs::msg::LaserScan::SharedPtr scan) {
-  origin_x_ = -width_ * resolution_ / 2.0;
-  origin_y_ = -height_ * resolution_ / 2.0;
+  // Only process if we have odometry data
+  if (robot_x_ == 0.0 && robot_y_ == 0.0) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                         "No odometry data received yet, skipping laser scan");
+    return;
+  }
 
   initializeCostmap();  
 
@@ -100,12 +144,17 @@ void CostmapNode::laserCallback(const sensor_msgs::msg::LaserScan::SharedPtr sca
     double range = scan->ranges[i];
 
     if (range < scan->range_max && range > scan->range_min) {
-      int x, y;
-      convertToGrid(range, angle, x, y);
-      markObstacle(x, y);
+      // Convert laser scan point to local coordinates (robot-centric)
+      double local_x = range * std::cos(angle);
+      double local_y = range * std::sin(angle);
+
+      int gx, gy;
+      convertToGrid(local_x, local_y, gx, gy);
+      markObstacle(gx, gy);
     }
   }
 
+  clearRobotFootprint();
   inflateObstacles();
   publishCostmap();
 }

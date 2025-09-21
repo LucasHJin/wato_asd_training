@@ -20,6 +20,7 @@ private:
     // Data
     nav_msgs::msg::OccupancyGrid latest_costmap_;
     nav_msgs::msg::OccupancyGrid global_map_;
+    nav_msgs::msg::Odometry latest_odom_;
     bool costmap_updated_{false};
 
     // Robot pose (from odom)
@@ -29,7 +30,7 @@ private:
     // Tracking movement for update threshold
     double last_x_{0.0};
     double last_y_{0.0};
-    double distance_threshold_{5.0};  // meters (tune this)
+    double distance_threshold_{1.5};  // meters (tune this)
     bool should_update_map_{false};
 
     // Callbacks
