@@ -39,6 +39,7 @@ void ControlNode::controlLoop()
         // Stop the robot if goal is reached or no path
         geometry_msgs::msg::Twist stop_cmd;
         cmd_vel_pub_->publish(stop_cmd);
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Goal reached - robot stopped");
         return;
     }
 
@@ -53,6 +54,16 @@ std::optional<geometry_msgs::msg::PoseStamped> ControlNode::findLookaheadPoint()
         return std::nullopt;
 
     geometry_msgs::msg::Point robot_pos = robot_odom_->pose.pose.position;
+
+    // First check if we've reached the final goal
+    auto &last_point = current_path_->poses.back();
+    double dist_to_goal = computeDistance(robot_pos, last_point.pose.position);
+    
+    if (dist_to_goal <= goal_tolerance_)
+    {
+        RCLCPP_INFO_ONCE(this->get_logger(), "Goal reached within tolerance: %.3fm", dist_to_goal);
+        return std::nullopt; // Goal reached
+    }
 
     // Find the closest point on the path to the robot
     size_t closest_idx = 0;
@@ -80,17 +91,28 @@ std::optional<geometry_msgs::msg::PoseStamped> ControlNode::findLookaheadPoint()
         }
     }
 
-    // If no point is beyond lookahead distance, check if we've reached the goal
-    auto &last_point = current_path_->poses.back();
-    double dist_to_goal = computeDistance(robot_pos, last_point.pose.position);
-    
-    if (dist_to_goal <= goal_tolerance_)
+    // If we're here, no point was beyond lookahead distance
+    // Check if we're close enough to the goal to stop
+    if (dist_to_goal <= goal_tolerance_ * 2.0)  // Use a slightly larger tolerance for stopping
     {
-        return std::nullopt; // Goal reached
+        RCLCPP_INFO_ONCE(this->get_logger(), "Near goal, stopping. Distance: %.3fm", dist_to_goal);
+        return std::nullopt;
     }
 
-    // Return the last point if we're close to the end of the path
-    return last_point;
+    // Only return the last point if we're still far from the goal
+    // This prevents wiggling when close to the end
+    if (dist_to_goal > lookahead_distance_)
+    {
+        return last_point;
+    }
+    else
+    {
+        // We're close to the goal but not quite within tolerance
+        // Return nullopt to stop and avoid wiggling
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500, 
+                             "Close to goal (%.3fm), stopping to avoid wiggling", dist_to_goal);
+        return std::nullopt;
+    }
 }
 
 // Compute velocity command toward target point
@@ -130,9 +152,16 @@ geometry_msgs::msg::Twist ControlNode::computeVelocity(const geometry_msgs::msg:
     const double max_curvature = 2.0; // Adjust as needed
     curvature = std::clamp(curvature, -max_curvature, max_curvature);
 
+    // Reduce speed when close to target to improve stability
+    double speed_factor = 1.0;
+    if (actual_distance < lookahead_distance_)
+    {
+        speed_factor = std::max(0.3, actual_distance / lookahead_distance_);
+    }
+
     // Set velocity commands
-    cmd_vel.linear.x = linear_speed_;
-    cmd_vel.angular.z = curvature * linear_speed_;
+    cmd_vel.linear.x = linear_speed_ * speed_factor;
+    cmd_vel.angular.z = curvature * cmd_vel.linear.x;
 
     // Limit angular velocity
     const double max_angular_vel = 1.5; // rad/s
