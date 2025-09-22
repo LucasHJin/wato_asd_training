@@ -4,36 +4,34 @@
 #include "rclcpp/rclcpp.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
+#include <cmath>
 
-class MapMemoryNode : public rclcpp::Node
-{
+class MapMemoryNode : public rclcpp::Node {
 public:
     MapMemoryNode();
 
 private:
-    // Subscribers & Publisher
+    // Subs + pubs
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr map_pub_;
+    
     rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::TimerBase::SharedPtr first_timer_;
 
     // Data
-    nav_msgs::msg::OccupancyGrid latest_costmap_;
     nav_msgs::msg::OccupancyGrid global_map_;
-    nav_msgs::msg::Odometry latest_odom_;
-    bool costmap_updated_{false};
-
-    // Robot pose (from odom)
-    double robot_x_{0.0};
-    double robot_y_{0.0};
-
-    // Tracking movement for update threshold
-    double last_x_{0.0};
-    double last_y_{0.0};
-    double distance_threshold_{1.5};  // meters (tune this)
-    bool should_update_map_{false};
-    bool first_costmap_received_{false};
-    bool first_odom_received_{false};
+    nav_msgs::msg::OccupancyGrid latest_costmap_;
+    
+    // Robot state
+    double robot_x_, robot_y_, robot_yaw_;
+    double last_x_, last_y_;
+    const double distance_threshold_;
+    
+    // Flags (when to update map)
+    bool costmap_updated_;
+    bool should_update_map_;
+    bool first_update_;
 
     // Callbacks
     void costmapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);

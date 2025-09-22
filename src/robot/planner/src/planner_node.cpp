@@ -4,8 +4,59 @@
 #include <cmath>
 #include <limits>
 
+// ------------------- Supporting Structures -------------------
+
+// 2D grid index
+struct CellIndex
+{
+  int x;
+  int y;
+
+  CellIndex(int xx, int yy) : x(xx), y(yy) {}
+  CellIndex() : x(0), y(0) {}
+
+  bool operator==(const CellIndex &other) const
+  {
+    return (x == other.x && y == other.y);
+  }
+
+  bool operator!=(const CellIndex &other) const
+  {
+    return (x != other.x || y != other.y);
+  }
+};
+
+// Hash function for CellIndex so it can be used in std::unordered_map
+struct CellIndexHash
+{
+  std::size_t operator()(const CellIndex &idx) const
+  {
+    // A simple hash combining x and y
+    return std::hash<int>()(idx.x) ^ (std::hash<int>()(idx.y) << 1);
+  }
+};
+
+// Structure representing a node in the A* open set
+struct AStarNode
+{
+  CellIndex index;
+  double f_score; // f = g + h
+
+  AStarNode(CellIndex idx, double f) : index(idx), f_score(f) {}
+};
+
+// Comparator for the priority queue (min-heap by f_score)
+struct CompareF
+{
+  bool operator()(const AStarNode &a, const AStarNode &b)
+  {
+    // We want the node with the smallest f_score on top
+    return a.f_score > b.f_score;
+  }
+};
+
 PlannerNode::PlannerNode()
-    : Node("planner"), planner_(robot::PlannerCore(this->get_logger())), state_(State::WAITING_FOR_GOAL)
+    : Node("planner_node"), state_(State::WAITING_FOR_GOAL)
 {
   // Subscribers
   map_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
@@ -21,9 +72,10 @@ PlannerNode::PlannerNode()
   // Timer
   timer_ = this->create_wall_timer(
       std::chrono::milliseconds(500), std::bind(&PlannerNode::timerCallback, this));
+
+  goal_received_ = false; // If endpoint to path has been received
 }
 
-// Map callback
 void PlannerNode::mapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
 {
   current_map_ = *msg;
@@ -33,7 +85,6 @@ void PlannerNode::mapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
   }
 }
 
-// Goal callback
 void PlannerNode::goalCallback(const geometry_msgs::msg::PointStamped::SharedPtr msg)
 {
   goal_ = *msg;
@@ -42,14 +93,12 @@ void PlannerNode::goalCallback(const geometry_msgs::msg::PointStamped::SharedPtr
   planPath();
 }
 
-// Odometry callback
 void PlannerNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
 {
   robot_pose_ = msg->pose.pose;
 }
 
-// Timer callback
-void PlannerNode::timerCallback()
+void timerCallback()
 {
   if (state_ == State::WAITING_FOR_ROBOT_TO_REACH_GOAL)
   {
@@ -57,7 +106,6 @@ void PlannerNode::timerCallback()
     {
       RCLCPP_INFO(this->get_logger(), "Goal reached!");
       state_ = State::WAITING_FOR_GOAL;
-      goal_received_ = false;
     }
     else
     {
@@ -67,15 +115,13 @@ void PlannerNode::timerCallback()
   }
 }
 
-// Check if goal is reached
 bool PlannerNode::goalReached()
 {
   double dx = goal_.point.x - robot_pose_.position.x;
   double dy = goal_.point.y - robot_pose_.position.y;
-  return std::sqrt(dx * dx + dy * dy) < 0.5; // threshold
+  return std::sqrt(dx * dx + dy * dy) < 0.5; // Need to be within 0.5m
 }
 
-// Heuristic: Euclidean distance (better than Manhattan for diagonal movement)
 double heuristic(const CellIndex &a, const CellIndex &b)
 {
   double dx = a.x - b.x;
@@ -83,48 +129,33 @@ double heuristic(const CellIndex &a, const CellIndex &b)
   return std::sqrt(dx * dx + dy * dy);
 }
 
-// Check if a cell is valid (inside map bounds and not a high-cost obstacle)
 bool isCellValid(const CellIndex &cell, const nav_msgs::msg::OccupancyGrid &map)
 {
   if (cell.x < 0 || cell.y < 0 || cell.x >= static_cast<int>(map.info.width) || cell.y >= static_cast<int>(map.info.height))
     return false;
-  
+
   int index = cell.y * map.info.width + cell.x;
   int8_t cost = map.data[index];
-  
-  // Allow free space (0), unknown (-1), and low-cost inflated areas
-  // Reject high-cost obstacles (>= 50)
-  return cost < 50;
+
+  return cost < 75; // Avoid high cost areas (75-100 -> likely obstacle)
 }
 
-// Get neighbors (8-connected for better paths)
-std::vector<std::pair<CellIndex, double>> getNeighborsWithCosts(const CellIndex &cell)
+std::vector<CellIndex> getNeighbors(const CellIndex &cell)
 {
-  std::vector<std::pair<CellIndex, double>> neighbors;
-  
-  // 4-connected neighbors (cost = 1.0)
-  neighbors.push_back({{cell.x + 1, cell.y}, 1.0});
-  neighbors.push_back({{cell.x - 1, cell.y}, 1.0});
-  neighbors.push_back({{cell.x, cell.y + 1}, 1.0});
-  neighbors.push_back({{cell.x, cell.y - 1}, 1.0});
-  
-  // Diagonal neighbors (cost = sqrt(2) ≈ 1.414)
-  const double diagonal_cost = std::sqrt(2.0);
-  neighbors.push_back({{cell.x + 1, cell.y + 1}, diagonal_cost});
-  neighbors.push_back({{cell.x + 1, cell.y - 1}, diagonal_cost});
-  neighbors.push_back({{cell.x - 1, cell.y + 1}, diagonal_cost});
-  neighbors.push_back({{cell.x - 1, cell.y - 1}, diagonal_cost});
-  
+  std::vector<CellIndex> neighbors;
+  neighbors.push_back({cell.x + 1, cell.y});
+  neighbors.push_back({cell.x - 1, cell.y});
+  neighbors.push_back({cell.x, cell.y + 1});
+  neighbors.push_back({cell.x, cell.y - 1});
   return neighbors;
 }
 
-// A* search algorithm with improved cost handling
 std::vector<CellIndex> aStar(const nav_msgs::msg::OccupancyGrid &map, const CellIndex &start, const CellIndex &goal)
 {
-  std::priority_queue<AStarNode, std::vector<AStarNode>, CompareF> open_set;
-  std::unordered_set<CellIndex, CellIndexHash> closed_set;
-  std::unordered_map<CellIndex, CellIndex, CellIndexHash> came_from;
-  std::unordered_map<CellIndex, double, CellIndexHash> g_score;
+  std::priority_queue<AStarNode, std::vector<AStarNode>, CompareF> open_set; // Available nodes
+  std::unordered_set<CellIndex, CellIndexHash> closed_set; // Visited 
+  std::unordered_map<CellIndex, CellIndex, CellIndexHash> came_from; // Backtracking
+  std::unordered_map<CellIndex, double, CellIndexHash> g_score; // Cost from start
 
   g_score[start] = 0.0;
   open_set.push(AStarNode(start, heuristic(start, goal)));
@@ -136,34 +167,33 @@ std::vector<CellIndex> aStar(const nav_msgs::msg::OccupancyGrid &map, const Cell
 
     if (current.index == goal)
     {
-      // Reconstruct path
       std::vector<CellIndex> path;
       CellIndex c = goal;
+      // Reconstruct path
       while (!(c == start))
       {
         path.push_back(c);
         c = came_from[c];
       }
       path.push_back(start);
-      std::reverse(path.begin(), path.end());
+      std::reverse(path.begin(), path.end()); // Path should go start -> goal
       return path;
     }
 
     closed_set.insert(current.index);
 
-    // Use 8-connected neighbors with appropriate costs
-    for (const auto &[neighbor, move_cost] : getNeighborsWithCosts(current.index))
+    // Go through neigbors
+    for (const auto &neighbor : getNeighbors(current.index))
     {
       if (!isCellValid(neighbor, map) || closed_set.count(neighbor) > 0)
         continue;
 
-      // Add terrain cost (costmap values) to movement cost
       int index = neighbor.y * map.info.width + neighbor.x;
-      double terrain_cost = std::max(0, static_cast<int>(map.data[index])) / 100.0; // Normalize 0-100 to 0-1
-      double total_move_cost = move_cost * (1.0 + terrain_cost); // Higher cost for inflated areas
+      double move_cost = 1.0;
 
-      double tentative_g = g_score[current.index] + total_move_cost;
+      double tentative_g = g_score[current.index] + move_cost;
 
+      // If new neighbor/cheaper paht -> update for future ref
       if (g_score.find(neighbor) == g_score.end() || tentative_g < g_score[neighbor])
       {
         came_from[neighbor] = current.index;
@@ -174,8 +204,7 @@ std::vector<CellIndex> aStar(const nav_msgs::msg::OccupancyGrid &map, const Cell
     }
   }
 
-  // Return empty if no path found
-  return {};
+  return {}; // No path found
 }
 
 void PlannerNode::planPath()
@@ -190,52 +219,39 @@ void PlannerNode::planPath()
   path.header.stamp = this->get_clock()->now();
   path.header.frame_id = "map";
 
-  // Convert robot_pose_ to start CellIndex
+  // Convert pose to starting cell index + goal to goal cell index
   int start_x = static_cast<int>((robot_pose_.position.x - current_map_.info.origin.position.x) / current_map_.info.resolution);
   int start_y = static_cast<int>((robot_pose_.position.y - current_map_.info.origin.position.y) / current_map_.info.resolution);
   CellIndex start{start_x, start_y};
-
-  // Convert goal_ to goal CellIndex
   int goal_x = static_cast<int>((goal_.point.x - current_map_.info.origin.position.x) / current_map_.info.resolution);
   int goal_y = static_cast<int>((goal_.point.y - current_map_.info.origin.position.y) / current_map_.info.resolution);
   CellIndex goal{goal_x, goal_y};
 
-  // Validate start and goal positions
-  if (!isCellValid(start, current_map_))
+  // Basic validation
+  if (!isCellValid(start, current_map_) || !isCellValid(goal, current_map_))
   {
-    RCLCPP_ERROR(this->get_logger(), "Start position (%d, %d) is not valid!", start.x, start.y);
+    RCLCPP_ERROR(this->get_logger(), "Start/Goal not valid.");
     return;
   }
 
-  if (!isCellValid(goal, current_map_))
-  {
-    RCLCPP_ERROR(this->get_logger(), "Goal position (%d, %d) is not valid!", goal.x, goal.y);
-    return;
-  }
-
-  RCLCPP_INFO(this->get_logger(), "Planning path from (%d, %d) to (%d, %d)", start.x, start.y, goal.x, goal.y);
-
-  // Run A* search
+  // A*
   std::vector<CellIndex> waypoints = aStar(current_map_, start, goal);
-
   if (waypoints.empty())
   {
-    RCLCPP_ERROR(this->get_logger(), "No path found from start to goal!");
+    RCLCPP_ERROR(this->get_logger(), "No path.");
     return;
   }
 
+  // Convert waypoints to path
   for (const auto &cell : waypoints)
   {
     geometry_msgs::msg::PoseStamped pose;
     pose.header.frame_id = "map";
     pose.header.stamp = this->get_clock()->now();
 
-    // Convert grid cell to world coordinates (use center of cell)
     pose.pose.position.x = current_map_.info.origin.position.x + (cell.x + 0.5) * current_map_.info.resolution;
     pose.pose.position.y = current_map_.info.origin.position.y + (cell.y + 0.5) * current_map_.info.resolution;
     pose.pose.position.z = 0.0;
-
-    // Keep default orientation
     pose.pose.orientation.w = 1.0;
 
     path.poses.push_back(pose);

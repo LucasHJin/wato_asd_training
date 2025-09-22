@@ -1,53 +1,54 @@
 #include "control_node.hpp"
 #include <cmath>
 #include <optional>
-#include <algorithm>
 
-ControlNode::ControlNode() : Node("control"), control_(robot::ControlCore(this->get_logger()))
+ControlNode::ControlNode() : Node("pure_pursuit_controller")
 {
-  // Initialize parameters
-  lookahead_distance_ = 1.0; // Lookahead distance
-  goal_tolerance_ = 0.1;     // Distance to consider the goal reached
-  linear_speed_ = 1.0;       // Constant forward speed
+    // Initialize parameters
+    lookahead_distance_ = 1.0;  // Lookahead distance
+    goal_tolerance_ = 0.1;     // Distance to consider the goal reached
+    linear_speed_ = 1.0;       // Constant forward speed
 
-  // Subscribers and Publishers
-  path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
-      "/path", 10, [this](const nav_msgs::msg::Path::SharedPtr msg)
-      { current_path_ = msg; });
+    // Subscribers and Publishers
+    path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
+        "/path", 10, [this](const nav_msgs::msg::Path::SharedPtr msg)
+        { current_path_ = msg; });
 
-  odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-      "/odom/filtered", 10, [this](const nav_msgs::msg::Odometry::SharedPtr msg)
-      { robot_odom_ = msg; });
+    odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+        "/odom/filtered", 10, [this](const nav_msgs::msg::Odometry::SharedPtr msg)
+        { robot_odom_ = msg; });
 
-  cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
+    cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
 
-  // Timer
-  control_timer_ = this->create_wall_timer(
-      std::chrono::milliseconds(100), [this]()
-      { controlLoop(); });
+    // Timer
+    control_timer_ = this->create_wall_timer(
+        std::chrono::milliseconds(100), [this]()
+        { controlLoop(); });
 }
 
-// Main control loop
 void ControlNode::controlLoop()
 {
-    if (!current_path_ || !robot_odom_)
-        return;
-
-    auto lookahead_point = findLookaheadPoint();
-    if (!lookahead_point)
-    {
-        // Stop the robot if goal is reached or no path
-        geometry_msgs::msg::Twist stop_cmd;
-        cmd_vel_pub_->publish(stop_cmd);
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Goal reached - robot stopped");
+    // Skip control if no path or odometry data is available
+    if (!current_path_ || !robot_odom_) {
         return;
     }
 
+    // Find the lookahead point
+    auto lookahead_point = findLookaheadPoint();
+    if (!lookahead_point) {
+        // Stop the robot
+        geometry_msgs::msg::Twist stop_cmd;
+        cmd_vel_pub_->publish(stop_cmd);
+        return;
+    }
+
+    // Compute velocity command
     auto cmd_vel = computeVelocity(*lookahead_point);
+
+    // Publish the velocity command
     cmd_vel_pub_->publish(cmd_vel);
 }
 
-// Find the lookahead point along the path
 std::optional<geometry_msgs::msg::PoseStamped> ControlNode::findLookaheadPoint()
 {
     if (!current_path_ || current_path_->poses.empty() || !robot_odom_)
@@ -55,67 +56,28 @@ std::optional<geometry_msgs::msg::PoseStamped> ControlNode::findLookaheadPoint()
 
     geometry_msgs::msg::Point robot_pos = robot_odom_->pose.pose.position;
 
-    // First check if we've reached the final goal
+    // Check if close enough to goal
     auto &last_point = current_path_->poses.back();
     double dist_to_goal = computeDistance(robot_pos, last_point.pose.position);
-    
     if (dist_to_goal <= goal_tolerance_)
     {
-        RCLCPP_INFO_ONCE(this->get_logger(), "Goal reached within tolerance: %.3fm", dist_to_goal);
-        return std::nullopt; // Goal reached
+        return std::nullopt; // Stop it
     }
 
-    // Find the closest point on the path to the robot
-    size_t closest_idx = 0;
-    double min_dist = std::numeric_limits<double>::max();
-    
-    for (size_t i = 0; i < current_path_->poses.size(); ++i)
+    // Else go thorugh path and find point lhdist away (last point if not far enough)
+    for (const auto &pose : current_path_->poses)
     {
-        double dist = computeDistance(robot_pos, current_path_->poses[i].pose.position);
-        if (dist < min_dist)
-        {
-            min_dist = dist;
-            closest_idx = i;
-        }
-    }
-
-    // Search forward from the closest point for the lookahead point
-    for (size_t i = closest_idx; i < current_path_->poses.size(); ++i)
-    {
-        double dist = computeDistance(robot_pos, current_path_->poses[i].pose.position);
+        double dist = computeDistance(robot_pos, pose.pose.position);
         
-        // If we find a point at or beyond lookahead distance, use it
         if (dist >= lookahead_distance_)
         {
-            return current_path_->poses[i];
+            return pose;
         }
     }
 
-    // If we're here, no point was beyond lookahead distance
-    // Check if we're close enough to the goal to stop
-    if (dist_to_goal <= goal_tolerance_ * 2.0)  // Use a slightly larger tolerance for stopping
-    {
-        RCLCPP_INFO_ONCE(this->get_logger(), "Near goal, stopping. Distance: %.3fm", dist_to_goal);
-        return std::nullopt;
-    }
-
-    // Only return the last point if we're still far from the goal
-    // This prevents wiggling when close to the end
-    if (dist_to_goal > lookahead_distance_)
-    {
-        return last_point;
-    }
-    else
-    {
-        // We're close to the goal but not quite within tolerance
-        // Return nullopt to stop and avoid wiggling
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500, 
-                             "Close to goal (%.3fm), stopping to avoid wiggling", dist_to_goal);
-        return std::nullopt;
-    }
+    return last_point;
 }
 
-// Compute velocity command toward target point
 geometry_msgs::msg::Twist ControlNode::computeVelocity(const geometry_msgs::msg::PoseStamped &target)
 {
     geometry_msgs::msg::Twist cmd_vel;
@@ -123,54 +85,34 @@ geometry_msgs::msg::Twist ControlNode::computeVelocity(const geometry_msgs::msg:
     if (!robot_odom_)
         return cmd_vel;
 
-    // Robot position and heading
     double x = robot_odom_->pose.pose.position.x;
     double y = robot_odom_->pose.pose.position.y;
     double yaw = extractYaw(robot_odom_->pose.pose.orientation);
 
-    // Target position relative to robot
+    // Vector from robot to goal
     double dx = target.pose.position.x - x;
     double dy = target.pose.position.y - y;
 
-    // Transform target into robot frame (correct transformation)
+    // Anchor goal to be based on robot
     double local_x = std::cos(yaw) * dx + std::sin(yaw) * dy;
     double local_y = -std::sin(yaw) * dx + std::cos(yaw) * dy;
 
-    // Actual distance to the target point
-    double actual_distance = std::sqrt(local_x * local_x + local_y * local_y);
+    double distance = std::sqrt(local_x * local_x + local_y * local_y);
     
-    // Avoid division by zero
-    if (actual_distance < 1e-6)
+    if (distance < 1e-6)
     {
-        return cmd_vel; // Return zero velocity
+        return cmd_vel; // 0 if close enough
     }
 
-    // Pure pursuit curvature calculation using actual distance
-    double curvature = (2.0 * local_y) / (actual_distance * actual_distance);
+    // Turning speed to reach target
+    double curvature = (2.0 * local_y) / (distance * distance);
 
-    // Limit curvature to prevent excessive turning
-    const double max_curvature = 2.0; // Adjust as needed
-    curvature = std::clamp(curvature, -max_curvature, max_curvature);
-
-    // Reduce speed when close to target to improve stability
-    double speed_factor = 1.0;
-    if (actual_distance < lookahead_distance_)
-    {
-        speed_factor = std::max(0.3, actual_distance / lookahead_distance_);
-    }
-
-    // Set velocity commands
-    cmd_vel.linear.x = linear_speed_ * speed_factor;
+    cmd_vel.linear.x = linear_speed_;
     cmd_vel.angular.z = curvature * cmd_vel.linear.x;
-
-    // Limit angular velocity
-    const double max_angular_vel = 1.5; // rad/s
-    cmd_vel.angular.z = std::clamp(cmd_vel.angular.z, -max_angular_vel, max_angular_vel);
 
     return cmd_vel;
 }
 
-// Compute Euclidean distance between two points
 double ControlNode::computeDistance(const geometry_msgs::msg::Point &a, const geometry_msgs::msg::Point &b)
 {
     double dx = a.x - b.x;
@@ -178,7 +120,6 @@ double ControlNode::computeDistance(const geometry_msgs::msg::Point &a, const ge
     return std::sqrt(dx*dx + dy*dy);
 }
 
-// Convert quaternion to yaw
 double ControlNode::extractYaw(const geometry_msgs::msg::Quaternion &quat)
 {
     double siny_cosp = 2.0 * (quat.w * quat.z + quat.x * quat.y);
@@ -186,7 +127,6 @@ double ControlNode::extractYaw(const geometry_msgs::msg::Quaternion &quat)
     return std::atan2(siny_cosp, cosy_cosp);
 }
 
-// Main entry point
 int main(int argc, char **argv)
 {
     rclcpp::init(argc, argv);
